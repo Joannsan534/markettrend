@@ -762,32 +762,41 @@ async function fetchCryptoLive(asset, days=365){
 
 /* Yahoo Finance via proxy — actions et indices */
 async function fetchStooqLive(symbol){
-  // symbol est le symbole Stooq : "aapl.us", "^spx", "^fchi", etc.
-  // /api/chart accepte maintenant directement ce format
-  const proxyUrl = `/api/chart?symbol=${encodeURIComponent(symbol)}`;
-  // Fallback direct Stooq en HTTPS (fonctionne depuis un vrai serveur)
+  // Symbole Yahoo Finance : AAPL, MSFT, ^FCHI, etc.
+  // Notre proxy /api/chart gère le fetch côté serveur → plus de CORS
+  const yahooSymbol = symbol.replace('.us','').replace('^spx','^GSPC').replace('^ndx','^NDX').replace('^fchi','^FCHI').replace('^ukx','^FTSE');
+  const proxyUrl = `/api/chart?symbol=${encodeURIComponent(yahooSymbol)}&range=2y&interval=1d`;
+  // Fallback Stooq direct (fonctionne parfois en HTTPS)
   const stooqUrl = `https://stooq.com/q/d/l/?s=${symbol}&i=d`;
 
-  // Tentative proxy backend (Stooq côté serveur → plus de CORS)
+  // Tentative proxy Yahoo
   try{
     const r = await fetch(proxyUrl, {cache:'no-cache'});
     if(r.ok){
       const j = await r.json();
-      // Format retourné par api/chart.js : { source, symbol, data:[{date,open,high,low,close,volume}] }
-      if(j.data && j.data.length >= 30){
-        return j.data.map(d => ({
-          date:   new Date(d.date),
-          price:  d.close,
-          open:   d.open   || d.close,
-          high:   d.high   || d.close,
-          low:    d.low    || d.close,
-          volume: d.volume || 0,
-        }));
+      const result = j?.chart?.result?.[0];
+      if(result && result.timestamp && result.indicators?.quote?.[0]){
+        const ts = result.timestamp;
+        const q  = result.indicators.quote[0];
+        const out = [];
+        for(let i=0;i<ts.length;i++){
+          const c = q.close[i];
+          if(!c || isNaN(c)) continue;
+          out.push({
+            date:   new Date(ts[i] * 1000),
+            price:  c,
+            open:   q.open[i]   || c,
+            high:   q.high[i]   || c,
+            low:    q.low[i]    || c,
+            volume: q.volume[i] || 0,
+          });
+        }
+        if(out.length >= 30) return out;
       }
     }
-  }catch(e){ console.warn('Chart proxy failed', symbol, e.message); }
+  }catch(e){ console.warn('Yahoo proxy failed', e.message); }
 
-  // Fallback direct Stooq CSV
+  // Fallback Stooq CSV direct
   try{
     const r = await fetch(stooqUrl, {cache:'no-cache'});
     if(!r.ok) throw new Error('stooq fail');
@@ -803,7 +812,7 @@ async function fetchStooqLive(symbol){
     if(out.length < 30) throw new Error('not enough rows');
     return out;
   }catch(e){
-    console.warn('Stooq direct failed', symbol, e.message);
+    console.warn('Stooq fallback for', symbol, e.message);
     return null;
   }
 }
@@ -881,40 +890,16 @@ async function loadAsset(asset, klass){
     series = genMockSeries(asset.tick, 700);
   } else {
     state.liveStatus = 'live';
+    /* if series came from CoinGecko, lacks open/high/low — generate close-derived */
     series.forEach((p, i)=>{
       if(p.open === undefined){
         const prev = i>0 ? series[i-1].price : p.price;
         p.open = prev;
         p.high = Math.max(p.price, prev) * (1.002 + Math.random()*0.005);
-        p.low  = Math.min(p.price, prev) * (0.998 - Math.random()*0.005);
+        p.low = Math.min(p.price, prev) * (0.998 - Math.random()*0.005);
         p.volume = 0;
       }
     });
-
-    // ── Pour les actions/indices : récupère la cotation temps réel
-    // et met à jour le dernier point de la série avec les vraies données du jour
-    if(klass !== 'crypto' && asset.stooq){
-      try{
-        const r = await fetch(`/api/quote?symbol=${encodeURIComponent(asset.tick)}`);
-        if(r.ok){
-          const q = await r.json();
-          if(q.price){
-            // Remplace ou ajoute le point du jour avec les données fraîches
-            const today = series[series.length-1];
-            today.price  = q.price;
-            today.open   = q.open   || today.open;
-            today.high   = q.dayHigh || today.high;
-            today.low    = q.dayLow  || today.low;
-            today.volume = q.volume  || today.volume;
-            // Mise à jour du prix dans state.prices aussi
-            const pct = q.source === 'alphavantage'
-              ? q.changePct * 100
-              : ((q.price - q.previousClose) / q.previousClose) * 100;
-            state.prices[asset.tick] = { price: q.price, pct };
-          }
-        }
-      }catch(e){ console.warn('Quote enrichment failed', e.message); }
-    }
   }
 
   state.history = series;
@@ -1476,11 +1461,7 @@ async function fetchQuickPrices(){
         if(j.price && j.previousClose){
           state.prices[a.tick] = {
             price: j.price,
-            // AV retourne changePct en décimal (0.032 = 3.2%)
-            // Stooq : on recalcule depuis price/open
-            pct: j.source === 'alphavantage'
-              ? j.changePct * 100
-              : ((j.price - j.previousClose) / j.previousClose) * 100,
+            pct: j.changePct !== undefined ? j.changePct * 100 : ((j.price - j.previousClose) / j.previousClose) * 100,
           };
           continue;
         }
