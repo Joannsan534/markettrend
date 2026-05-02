@@ -769,32 +769,37 @@ async function fetchStooqLive(symbol){
   // Fallback Stooq direct (fonctionne parfois en HTTPS)
   const stooqUrl = `https://stooq.com/q/d/l/?s=${symbol}&i=d`;
 
-  // Tentative proxy Yahoo
+  // Tentative proxy (Stooq via backend)
   try{
     const r = await fetch(proxyUrl, {cache:'no-cache'});
     if(r.ok){
       const j = await r.json();
+      // Nouveau format : { source, symbol, data:[{date,open,high,low,close,volume}] }
+      if(j.data && j.data.length >= 30){
+        return j.data.map(d => ({
+          date:   new Date(d.date),
+          price:  d.close,
+          open:   d.open  || d.close,
+          high:   d.high  || d.close,
+          low:    d.low   || d.close,
+          volume: d.volume || 0,
+        }));
+      }
+      // Ancien format Yahoo (au cas où) : { chart.result[0].timestamp }
       const result = j?.chart?.result?.[0];
-      if(result && result.timestamp && result.indicators?.quote?.[0]){
+      if(result && result.timestamp){
         const ts = result.timestamp;
         const q  = result.indicators.quote[0];
         const out = [];
         for(let i=0;i<ts.length;i++){
           const c = q.close[i];
           if(!c || isNaN(c)) continue;
-          out.push({
-            date:   new Date(ts[i] * 1000),
-            price:  c,
-            open:   q.open[i]   || c,
-            high:   q.high[i]   || c,
-            low:    q.low[i]    || c,
-            volume: q.volume[i] || 0,
-          });
+          out.push({ date:new Date(ts[i]*1000), price:c, open:q.open[i]||c, high:q.high[i]||c, low:q.low[i]||c, volume:q.volume[i]||0 });
         }
         if(out.length >= 30) return out;
       }
     }
-  }catch(e){ console.warn('Yahoo proxy failed', e.message); }
+  }catch(e){ console.warn('Chart proxy failed', e.message); }
 
   // Fallback Stooq CSV direct
   try{
